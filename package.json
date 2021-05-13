@@ -1,0 +1,13 @@
+{
+  "name": "jtg",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./jtg.mjs",
+  "description": "JS task group. Simple JS-based replacement for Make, Gulp, etc.",
+  "keywords": ["task-runner", "build", "make", "gulp"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mitranim/jtg.git"
+  },
+  "license": "Unlicense"
+}
