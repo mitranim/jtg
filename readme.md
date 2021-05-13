@@ -1,6 +1,6 @@
 ## Overview
 
-"JS task group". Simple JS-based replacement for Make, Gulp, etc. Similar in design to Go [Gtg](https://github.com/mitranim/gtg).
+"JS Task Group". Simple JS-based replacement for Make, Gulp, etc. Similar in design to Go [Gtg](https://github.com/mitranim/gtg).
 
 Jtg works differently from other task runners. It's _not_ a CLI executable. It's just a library that you import and call.
 
@@ -12,19 +12,20 @@ Tiny with no dependencies.
 * [Usage](#usage)
 * [Tasks](#tasks)
 * [Cancelation](#cancelation)
+  * [Process Leaks](#process-leaks)
 * [API](#api)
   * [`function runCli`](#function-runclifuns)
   * [`function runArgs`](#function-runargsfuns-args)
-  * [`function par`](#function-parctx-funs)
-  * [`function ser`](#function-serctx-funs)
-  * [`function spawn`](#function-spawnctx-cmd-args)
-  * [`function fork`](#function-forkctx-cmd-args)
-  * [`function link`](#function-linkctx-proc)
+  * [`function spawn`](#function-spawncmd-args-opts)
+  * [`function fork`](#function-forkcmd-args-opts)
+  * [`function link`](#function-linkproc)
   * [`function wait`](#function-waitproc)
   * [`function kill`](#function-killproc)
   * [`class Ctx`](#class-ctx)
     * [`property ctx.signal`](#property-ctxsignal)
     * [`method ctx.run(fun)`](#method-ctxrunfun)
+    * [`method ctx.par(fun)`](#method-ctxparfuns)
+    * [`method ctx.ser(fun)`](#method-ctxserfuns)
 
 ## Why
 
@@ -50,7 +51,7 @@ node make.mjs --help
 # Known tasks (case-sensitive): ["watch","build","styles","scripts","server"]
 ```
 
-Sample `make.mjs`. The file name is arbitrary. The `sass` example is oversimplified, might not work on Windows.
+Sample `make.mjs`. The file name is arbitrary.
 
 ```js
 import * as fp from 'fs/promises'
@@ -59,19 +60,19 @@ import * as j from 'jtg'
 j.runCli(watch, build, styles, scripts, server)
 
 async function watch(ctx) {
-  await j.par(ctx, stylesW, scriptsW, serverW)
+  await ctx.par(stylesW, scriptsW, serverW)
 }
 
 async function build(ctx) {
-  await j.par(ctx, styles, scripts)
+  await ctx.par(styles, scripts)
 }
 
 async function styles(ctx) {
-  await j.spawn(ctx, 'sass', 'styles/main.scss:target/styles/main.css')
+  await j.wait(j.spawn('sass', ['main.scss:main.css'], ctx))
 }
 
 async function stylesW(ctx) {
-  await j.spawn(ctx, 'sass', '--watch', 'styles/main.scss:target/styles/main.css')
+  await j.wait(j.spawn('sass', ['main.scss:main.css', '--watch'], ctx))
 }
 
 async function scripts(ctx) {
@@ -89,9 +90,8 @@ async function server(ctx) {
 }
 
 async function serverW(ctx) {
-  const start = () => j.fork(ctx, './scripts/server.mjs')
-
-  const events = fp.watch('scripts', {recursive: true, signal: ctx.signal})
+  const start = () => j.fork('./scripts/server.mjs', [], ctx)
+  const events = fp.watch('scripts', {recursive: true, ...ctx})
 
   let proc = start()
   for (const _ of events) {
@@ -107,7 +107,9 @@ In Jtg, tasks are named functions. On the CLI, you specify the name of the task 
 
 Like other task runners, Jtg forms a "task group", where each task runs no more than once. This is convenient for build systems where many tasks rely on some shared task, and may be invoked either individually or all together. See the [Usage](#usage) example above.
 
-A task takes one argument: a [`Ctx`](#class-ctx) instance. The context stores the results of previously-called task functions, which allows [`par`](#function-parctx-funs) and [`ser`](#function-serctx-funs) to deduplicate them. It also has an associated [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal), used by [`spawn`](#function-spawnctx-cmd-args) and [`fork`](#function-forkctx-cmd-args). You should pass [`ctx.signal`](#property-ctxsignal) to APIs that support cancelation, such as `fetch`, `"fs/promises".watch`, and so on.
+A task takes one argument: a [`Ctx`](#class-ctx) instance. The context stores the results of previously-called task functions, which allows [`ctx.par`](#method-ctxparfuns) and [`ctx.ser`](#method-ctxserfuns) to deduplicate them. It also has an associated [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal): [`ctx.signal`](#property-ctxsignal).
+
+Jtg leaves error handling to you. If you don't handle exceptions, they crash the process. For build tools, this is usually desirable.
 
 ## Cancelation
 
@@ -118,16 +120,24 @@ Cancelation happens for the following reasons:
 
 Cancelation happens in the following ways:
 
-* When the main process terminates, well-behaved subprocesses should also terminate. Subshells misbehave, see below.
-* When the main task terminates, but the process is still running, the [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) available as [`ctx.signal`](#property-ctxsignal) is aborted, causing termination of running subprocesses created by [`spawn`](#function-spawnctx-cmd-args) and [`fork`](#function-forkctx-cmd-args), or any other activities that took [`ctx.signal`](#property-ctxsignal).
+* When the main process terminates, its _immediate_ children also terminate. On Windows, this is true for all immediate children. On Unix, this is true for children created by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts). However, _indirect_ children may not terminate; see [Process Leaks](#process-leaks).
+* When the main task terminates, but the process is still running, the [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) available as [`ctx.signal`](#property-ctxsignal) is aborted, causing termination of any activities that took this signal, including subprocesses created by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts), if `ctx` was passed to them.
 
-Caution: some subprocesses, when killed programmatically, don't terminate their children. The main offender is subshells such as `sh` (Unix) and `cmd.exe` (Windows). `Ctrl+C` would usually terminate the entire tree, but an unhandled exception in a task, causing programmatic shutdown of the Node process, would orphan the children of any spawned subshells, leaving them hanging in the background. Due to the limitations of the Node child process API, Jtg currently does not provide any solution to this problem. To avoid this issue, avoid using subshells; use [`fork`](#function-forkctx-cmd-args) and [`spawn`](#function-spawnctx-cmd-args) to spawn well-behaved executables directly.
+### Process Leaks
+
+By default, on _all_ operating systems, child processes don't terminate together with parents. On Windows, Node uses the "job object" API to link with its _immediate_ children, but not their descendants. Be aware that most programs, written for most systems, don't link with their child processes this way.
+
+Explicit termination via `Ctrl+C` usually works on every system, but crashes are fraught with peril. When you shell out to `sh` (Unix) or `cmd.exe` (Windows) to spawn another program, and then Node crashes or gets killed, the shell will terminate, but that other program will not.
+
+On Unix, Jtg makes an effort to kill entire subprocess groups. However, on Windows, the necessary operating system APIs appear to be unavailable in Node. To reduce process leaks, avoid sub-sub-processes.
+
+The [Usage](#usage) example above invokes `sass`, which demonstrates this very problem. At the time of writing, the recommended Sass implementation is `dart-sass`, and the recommended way to install it on Windows is via Chocolatey. The installation process creates one real executable and one unnecessary wrapper executable, which shells out to the real one, without linking together via a job object. An abrupt termination leaks the sub-sub-process. You can avoid this issue by modifying your `%PATH%`, allowing the OS to find the real executable before the fake one. The problem should never have existed in the first place.
 
 ## API
 
 ### `function runCli(...funs)`
 
-Shortcut for CLI scripts. See the [Usage](#usage) example above. Simply calls `runArgs` with CLI args.
+Shortcut for CLI scripts. See the [Usage](#usage) example above. Simply calls [`runArgs`](#function-runargsfuns-args) with CLI args.
 
 ### `function runArgs(funs, args)`
 
@@ -138,7 +148,7 @@ Chooses one task function, by name, based on the provided args. Runs the task, o
 
 In addition to provided functions, supports `-h`, `--help` and `help`, which print available tasks and terminate. If there's no match, prints available tasks and terminates.
 
-Like most Jtg functions, this is async. If a task was found, returns a promise.
+Like most Jtg functions, this is async. If a task was found, returns the promise of its execution.
 
 ```js
 // Runs `watch`.
@@ -151,61 +161,39 @@ j.runArgs([build, watch], [])
 j.runArgs([build, watch], ['--help'])
 ```
 
-### `function par(ctx, ...funs)`
-
-Short for "parallel", or rather "concurrent". Runs the provided task functions concurrently, but no more than once per [`Ctx`](#class-ctx). The result of every task function is stored in `ctx` and reused on redundant calls.
-
-```js
-async function watch(ctx) {
-  await j.par(ctx, stylesW, scriptsW, serverW)
-}
-```
-
-### `function ser(ctx, ...funs)`
-
-Short for "serial". Runs the provided task functions serially, but no more than once per [`Ctx`](#class-ctx). The result of every task function is stored in `ctx` and reused on redundant calls.
-
-```js
-async function html(ctx) {
-  await j.ser(ctx, clean, styles, templates)
-}
-```
-
-### `function spawn(ctx, cmd, ...args)`
+### `function spawn(cmd, args, opts)`
 
 Variant of `child_process.spawn` where:
 
 * Standard output/error is inherited from the parent process.
-* The proc is terminated when `ctx` terminates.
+* Sub-sub-processes are less likely to [leak](#process-leaks) (Unix only).
 
-Should be combined with [`wait`](#function-waitproc).
+Should be combined with [`wait`](#function-waitproc). Pass `ctx` as the last argument to take advantage of [`ctx.signal`](#property-ctxsignal) for cancelation.
 
 ```js
 async function styles(ctx) {
-  await j.wait(j.spawn(ctx, 'sass', 'main.scss:main.css'))
+  await j.wait(j.spawn('sass', ['main.scss:main.css'], ctx))
 }
 ```
 
-### `function fork(ctx, cmd, ...args)`
+### `function fork(cmd, args, opts)`
 
 Variant of `child_process.fork` where:
 
 * Standard output/error is inherited from the parent process.
-* The proc is terminated when `ctx` terminates.
+* Sub-sub-processes are less likely to [leak](#process-leaks) (Unix only).
 
-Should be combined with [`wait`](#function-waitproc).
+Should be combined with [`wait`](#function-waitproc). Pass `ctx` as the last argument to take advantage of [`ctx.signal`](#property-ctxsignal) for cancelation.
 
 ```js
 async function server(ctx) {
-  await j.wait(j.fork(ctx, './scripts/server.mjs'))
+  await j.wait(j.fork('./scripts/server.mjs', [], ctx))
 }
 ```
 
-### `function link(ctx, proc)`
+### `function link(proc)`
 
-Used internally by [`spawn`](#function-spawnctx-cmd-args) and [`fork`](#function-forkctx-cmd-args). Links the lifetime of the child process to the lifetime of `ctx`. When `ctx` terminates, the child process is killed.
-
-Assumes that `proc` was spawned by [`spawn`](#function-spawnctx-cmd-args) or [`fork`](#function-forkctx-cmd-args). These functions share some platform-specific logic to increase the likelihood of terminating the entire subprocess tree.
+Used internally by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts). Registers the process for additional cleanup via [`kill`](#function-killproc). Returns the same process.
 
 ### `function wait(proc)`
 
@@ -213,19 +201,47 @@ Returns a `Promise` that resolves when the provided process terminates for any r
 
 ```js
 async function styles(ctx) {
-  await j.wait(j.spawn(ctx, 'sass', 'main.scss:main.css'))
+  await j.wait(j.spawn('sass', ['main.scss:main.css'], ctx))
 }
 ```
 
 ### `function kill(proc)`
 
-Variant of `proc.kill()` that tries to terminate the entire subprocess tree. The proc must have been spawned by [`spawn`](#function-spawnctx-cmd-args) or [`fork`](#function-forkctx-cmd-args), otherwise this might explode.
+Variant of `proc.kill()` that tries to terminate the entire subprocess tree. Assumes that it was spawned by [`spawn`](#function-spawncmd-args-opts) or [`fork`](#function-forkcmd-args-opts). These functions share some platform-specific logic.
 
-Used internally by [`link`](#function-linkctx-proc). In most cases, you don't need to call this. Provided for cases such as restarting a server on changes, where a manual kill is required. In most cases, `proc.kill()` is equivalent.
+Automatically used by [`link`](#function-linkproc). In most cases, you don't need to call this. Provided for cases such as restarting a server on changes, where a manual kill is required.
+
+On Windows, this is equivalent to `proc.kill()`. On Unix, this tries to send a termination signal to the entire subprocess group.
+
+```js
+async function serverW(ctx) {
+  const start = () => j.fork('./scripts/server.mjs', [], ctx)
+  const events = fp.watch('scripts', {recursive: true, ...ctx})
+
+  let proc = start()
+  for (const _ of events) {
+    j.kill(proc)
+    proc = start()
+  }
+}
+```
 
 ### `class Ctx`
 
-Represents a "task group", or perhaps the context of a task run. Created automatically. The same instance is passed to every task function in the group. Stores results of tasks invocations for deduplication.
+Represents a "task group", the context of a task run. Created automatically. The same instance is passed to every task in the group. Stores their results for deduplication.
+
+The only enumerable property is [`ctx.signal`](#property-ctxsignal). When calling APIs that take a `signal` for cancelation, pass `ctx` directly, or spread it into other options:
+
+```js
+import * as fp from 'fs/promises'
+import * as j from 'jtg'
+
+const events = fp.watch('some_folder', ctx)
+const events = fp.watch('some_folder', {recursive: true, ...ctx})
+
+const proc = j.fork('some_file.mjs', [], ctx)
+const proc = j.fork('some_file.mjs', [], {...ctx, killSignal: 'SIGINT'})
+```
 
 #### `property ctx.signal`
 
@@ -235,12 +251,12 @@ Associated [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/Abor
 
 Runs the provided task function no more than once. If the task was previously invoked (and possibly still running!), its result is stored and returned from this call. For async functions, their stored result is a promise, not the final value.
 
-This is for singular dependencies. For multiple dependencies, use [`par`](#function-parctx-funs) and [`ser`](#function-serctx-funs).
+This is for singular dependencies. For multiple dependencies, use [`ctx.par`](#method-ctxparfuns) and [`ctx.ser`](#method-ctxserfuns).
 
 ```js
 // build -> [styles + scripts] -> clean
 async function build(ctx) {
-  await par(ctx, styles, scripts)
+  await ctx.par(styles, scripts)
 }
 
 // Called from two tasks, but runs only once.
@@ -256,6 +272,26 @@ async function styles(ctx) {
 async function scripts() {
   await ctx.run(clean)
   await someScriptBuild(ctx)
+}
+```
+
+### `method ctx.par(...funs)`
+
+Short for "parallel", or rather "concurrent". Runs the provided task functions concurrently, but no more than once per [`Ctx`](#class-ctx). The result of every task function is stored in `ctx` and reused on redundant calls.
+
+```js
+async function watch(ctx) {
+  await ctx.par(stylesW, scriptsW, serverW)
+}
+```
+
+### `method ctx.ser(...funs)`
+
+Short for "serial". Runs the provided task functions serially, but no more than once per [`Ctx`](#class-ctx). The result of every task function is stored in `ctx` and reused on redundant calls.
+
+```js
+async function html(ctx) {
+  await ctx.ser(clean, styles, templates)
 }
 ```
 

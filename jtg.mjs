@@ -39,49 +39,37 @@ export function runArgs(funs, args) {
   process.exit(1)
 }
 
-export function par(ctx, ...funs) {
-  validInst(ctx, Ctx)
-  eachValid(funs, isFun)
-  return Promise.all(funs.map(ctx.run, ctx))
-}
+export function spawn(cmd, args, opts) {
+  procValid(cmd, args, opts)
 
-export async function ser(ctx, ...funs) {
-  validInst(ctx, Ctx)
-  eachValid(funs, isFun)
-  for (const fun of funs) await ctx.run(fun)
-}
-
-export function spawn(ctx, cmd, ...args) {
-  procValid(ctx, cmd, args)
-  return link(ctx, cp.spawn(cmd, args, {
+  return link(cp.spawn(cmd, args, {
     stdio: ['ignore', 'inherit', 'inherit'],
     detached: !isWin,
-  }))
+    ...opts,
+   }))
 }
 
-export function fork(ctx, cmd, ...args) {
-  procValid(ctx, cmd, args)
-  return link(ctx, cp.fork(cmd, args, {
+export function fork(cmd, args, opts) {
+  procValid(cmd, args, opts)
+
+  return link(cp.fork(cmd, args, {
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     detached: !isWin,
+    ...opts,
   }))
 }
 
-export function link(ctx, proc) {
-  validInst(ctx, Ctx)
+export function link(proc) {
   validInst(proc, cp.ChildProcess)
 
-  const {signal: sig} = ctx
-
   function cleanup() {
-    sig.removeEventListener('abort', cleanup)
     proc.removeListener('exit', cleanup)
+    procs.delete(proc)
     kill(proc)
   }
 
+  procs.add(proc)
   proc.once('exit', cleanup)
-  sig.addEventListener('abort', cleanup, {once: true})
-
   return proc
 }
 
@@ -111,15 +99,23 @@ export function kill(proc) {
     throw Error(`can't kill process ${show(proc.spawnargs)} without pid`)
   }
 
+  // Not ideal. Unless the process explicitly adds its child processes to its
+  // own job object, this causes them to get orphaned.
   if (isWin) {
     proc.kill()
     return
   }
 
+  // Requires that the process was spawned with `detached: true`, putting it in
+  // its own group. Jtg's `spawn` and `fork` do that.
   process.kill(-proc.pid)
 }
 
 /* Internal Utils */
+
+const isWin = process.platform === 'win32'
+const procs = new Set()
+process.once('exit', killRemainingProcs)
 
 export async function runMain(fun) {
   const ctx = new Ctx()
@@ -152,19 +148,38 @@ export class Funs extends Map {
 export class Ctx extends Map {
   constructor() {
     super()
-    this.abc = new AbortController()
+
+    Object.defineProperty(this, 'abc', {
+      value: new AbortController(),
+      enumerable: false,
+      configurable: true,
+    })
+
+    Object.defineProperty(this, 'signal', {
+      get() {return this.abc.signal},
+      enumerable: true,
+      configurable: true,
+    })
   }
 
-  get signal() {return this.abc.signal}
+  get [Symbol.toStringTag]() {return this.constructor.name}
 
   run(fun) {
     if (!this.has(fun)) this.set(fun, fun(this))
     return this.get(fun)
   }
 
-  deinit() {this.abc.abort()}
+  par(...funs) {
+    eachValid(funs, isFun)
+    return Promise.all(funs.map(this.run, this))
+  }
 
-  get [Symbol.toStringTag]() {return this.constructor.name}
+  async ser(...funs) {
+    eachValid(funs, isFun)
+    for (const fun of funs) await this.run(fun)
+  }
+
+  deinit() {this.abc.abort()}
 }
 
 function onProcExit(proc) {
@@ -177,12 +192,19 @@ function onProcExit(proc) {
   }
 }
 
-const isWin = process.platform === 'win32'
-
-function procValid(ctx, cmd, args) {
-  validInst(ctx, Ctx)
+function procValid(cmd, args, opts) {
   valid(cmd, isStr)
-  eachValid(args, isStr)
+  if (!isNil(args)) eachValid(args, isStr)
+  if (isNil(opts)) valid(opts, isStruct)
+}
+
+function killRemainingProcs() {
+  procs.forEach(killRemainingProc)
+}
+
+function killRemainingProc(proc) {
+  procs.delete(proc)
+  kill(proc)
 }
 
 function help(funs) {
@@ -191,14 +213,14 @@ function help(funs) {
   return `Known tasks (case-sensitive): ${show(names)}`
 }
 
-function isNil(val)         {return val == null}
-function isStr(val)         {return typeof val === 'string'}
-function isFun(val)         {return typeof val === 'function'}
-function isObj(val)         {return val !== null && typeof val === 'object'}
-function isArr(val)         {return isInst(val, Array)}
-function isComp(val)        {return isObj(val) || isFun(val)}
-function isPromise(val)     {return isComp(val) && isFun(val.then) && isFun(val.catch)}
-function isInst(val, Cls)   {return isComp(val) && val instanceof Cls}
+function isNil(val)       {return val == null}
+function isStr(val)       {return typeof val === 'string'}
+function isFun(val)       {return typeof val === 'function'}
+function isObj(val)       {return val !== null && typeof val === 'object'}
+function isArr(val)       {return isInst(val, Array)}
+function isComp(val)      {return isObj(val) || isFun(val)}
+function isStruct(val)    {return isObj(val) && !isArr(val)}
+function isInst(val, Cls) {return isComp(val) && val instanceof Cls}
 
 function isDict(val) {
   if (!isObj(val)) return false
