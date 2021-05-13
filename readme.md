@@ -94,7 +94,7 @@ async function serverW(ctx) {
   const events = fp.watch('scripts', {recursive: true, ...ctx})
 
   let proc = start()
-  for (const _ of events) {
+  for await (const _ of events) {
     j.kill(proc)
     proc = start()
   }
@@ -219,7 +219,7 @@ async function serverW(ctx) {
   const events = fp.watch('scripts', {recursive: true, ...ctx})
 
   let proc = start()
-  for (const _ of events) {
+  for await (const _ of events) {
     j.kill(proc)
     proc = start()
   }
