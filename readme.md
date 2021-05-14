@@ -4,7 +4,7 @@
 
 Jtg works differently from other task runners. It's _not_ a CLI executable. It's just a library that you import and call.
 
-Tiny with no dependencies.
+Tiny, depends only on Node.js (>= 0.15).
 
 ## TOC
 
@@ -57,7 +57,7 @@ Sample `make.mjs`. The file name is arbitrary.
 import * as fp from 'fs/promises'
 import * as j from 'jtg'
 
-j.runCli(watch, build, styles, scripts, server)
+await j.runCli(watch, build, styles, scripts, server)
 
 async function watch(ctx) {
   await ctx.par(stylesW, scriptsW, serverW)
@@ -86,6 +86,7 @@ async function scriptsW(ctx) {
 }
 
 async function server(ctx) {
+  // The module should use top-level await. This line waits unless it crashes.
   await import('./scripts/server.mjs')
 }
 
