@@ -29,8 +29,8 @@ Tiny, depends only on Node.js (>= 0.15).
 
 ## Why
 
-* Make is not portable.
-* `package.json` scripts are not portable. Also, `npm run` is slow to start.
+* Make is less portable.
+* `package.json` scripts are less portable. Also, `npm run` is slow to start.
 * Gulp is too bloated and complex.
 * Most task runners force you to use their CLI, invariably bloated, slow, buggy, and full of weird shit.
 
