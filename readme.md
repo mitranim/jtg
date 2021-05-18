@@ -1,6 +1,6 @@
 ## Overview
 
-"JS Task Group". Simple JS-based replacement for Make, Gulp, etc. Similar in design to Go [Gtg](https://github.com/mitranim/gtg).
+"JS Task Group". Simple JS-based replacement for Make, Gulp, etc. Similar in design to [Gtg](https://github.com/mitranim/gtg) made for Go.
 
 Jtg works differently from other task runners. It's _not_ a CLI executable. It's just a library that you import and call.
 
@@ -21,11 +21,18 @@ Tiny, depends only on Node.js (>= 0.15).
   * [`function link`](#function-linkproc)
   * [`function wait`](#function-waitproc)
   * [`function kill`](#function-killproc)
+  * [`function emptty`](#function-emptty)
   * [`class Ctx`](#class-ctx)
     * [`property ctx.signal`](#property-ctxsignal)
-    * [`method ctx.run(fun)`](#method-ctxrunfun)
-    * [`method ctx.par(fun)`](#method-ctxparfuns)
-    * [`method ctx.ser(fun)`](#method-ctxserfuns)
+    * [`method ctx.run`](#method-ctxrunfun)
+    * [`method ctx.par`](#method-ctxparfuns)
+    * [`method ctx.ser`](#method-ctxserfuns)
+    * [`method ctx.sub`](#method-ctxsub)
+    * [`method ctx.re`](#method-ctxre)
+    * [`method ctx.each`](#method-ctxeachiter)
+    * [`method ctx.preEach`](#method-ctxpreeachiter)
+  * [Undocumented](#undocumented)
+* [Changelog](#changelog)
 
 ## Why
 
@@ -86,18 +93,15 @@ async function scriptsW(ctx) {
 }
 
 async function server(ctx) {
-  // The module should use top-level await. This line waits unless it crashes.
+  // Imported module should use top-level await to "block" until a crash.
   await import('./scripts/server.mjs')
 }
 
 async function serverW(ctx) {
-  const start = () => j.fork('./scripts/server.mjs', [], ctx)
   const events = fp.watch('scripts', {recursive: true, ...ctx})
 
-  let proc = start()
-  for await (const _ of events) {
-    j.kill(proc)
-    proc = start()
+  for await (const [sub] of ctx.preEach(events)) {
+    j.fork('./scripts/server.mjs', [], sub).once('error', j.logNonAbort)
   }
 }
 ```
@@ -214,18 +218,9 @@ Automatically used by [`link`](#function-linkproc). In most cases, you don't nee
 
 On Windows, this is equivalent to `proc.kill()`. On Unix, this tries to send a termination signal to the entire subprocess group.
 
-```js
-async function serverW(ctx) {
-  const start = () => j.fork('./scripts/server.mjs', [], ctx)
-  const events = fp.watch('scripts', {recursive: true, ...ctx})
+### `function emptty()`
 
-  let proc = start()
-  for await (const _ of events) {
-    j.kill(proc)
-    proc = start()
-  }
-}
-```
+Clears the terminal. More specifically, prints (to stdout) escape codes "Reset to Initial State" and "Erase in Display (3)", causing a full-clear in most terminals. Useful for watching-and-restarting.
 
 ### `class Ctx`
 
@@ -276,7 +271,7 @@ async function scripts() {
 }
 ```
 
-### `method ctx.par(...funs)`
+#### `method ctx.par(...funs)`
 
 Short for "parallel", or rather "concurrent". Runs the provided task functions concurrently, but no more than once per [`Ctx`](#class-ctx). The result of every task function is stored in `ctx` and reused on redundant calls.
 
@@ -286,7 +281,7 @@ async function watch(ctx) {
 }
 ```
 
-### `method ctx.ser(...funs)`
+#### `method ctx.ser(...funs)`
 
 Short for "serial". Runs the provided task functions serially, but no more than once per [`Ctx`](#class-ctx). The result of every task function is stored in `ctx` and reused on redundant calls.
 
@@ -295,6 +290,111 @@ async function html(ctx) {
   await ctx.ser(clean, styles, templates)
 }
 ```
+
+#### `method ctx.sub()`
+
+Creates a sub-context that:
+
+* Prototypally inherits from the super.
+* May be aborted without affecting the super.
+* Is aborted when the super is aborted.
+
+Useful for watching-and-restarting. Should be paired with [`ctx.re`](#method-ctxre) to abort and replace the sub-context on each iteration.
+
+Most of the time, you should use [`ctx.each`](#method-ctxeachiter) or [`ctx.preEach`](#method-ctxpreeachiter) instead.
+
+#### `method ctx.re()`
+
+Short for "replace". Aborts the context and returns a new _sibling_ context. Should be used on sub-contexts created via [`ctx.sub`](#method-ctxsub).
+
+```
+        super
+       /
+      /
+    sub0
+
+    sub0.re() -> sub1
+
+        super
+       /     \
+      /       \
+    sub0      sub1
+    (aborted)
+```
+
+#### `method ctx.each(iter)`
+
+Wraps an [async iterable](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of). Returns an iterable that yields `[sub, val]` for each `val` in the iterable, where `sub` is a [_sub-context_](#method-ctxsub) of `ctx`, aborted before the next iteration.
+
+Useful for watching-and-restarting. Consider using [`emptty`](#function-emptty) to clear the terminal on each iteration. Also see [`ctx.preEach`](#method-ctxpreeachiter) that runs the first iteration immediately.
+
+Gotcha 1: handle all your errors.
+
+Gotcha 2: all sub- and super- contexts share the memory of previously-called tasks. Tasks that repeat in a loop must be run "manually", _not_ through `ctx.run`, `ctx.ser` or `ctx.par`, which would deduplicate them.
+
+```js
+import * as fp from 'fs/promises'
+
+async function watch(ctx) {
+  const events = fp.watch('some_folder', ctx)
+
+  for await (const [sub, event] of ctx.each(events)) {
+    j.emptty()
+    console.log('[watch] FS event:', event)
+    startSomeActivity(sub).catch(j.logNonAbort)
+  }
+}
+```
+
+#### `method ctx.preEach(iter, fun)`
+
+where `fun(ctx, any)`.
+
+Same as [`ctx.each`](#method-ctxeachiter), but starts immediately, by yielding one sub-context before walking the async iterable.
+
+Useful for watching-and-restarting.
+
+```js
+import * as fp from 'fs/promises'
+
+async function watch() {
+  const events = fp.watch('some_folder', ctx)
+
+  for await (const [sub] of ctx.preEach(events)) {
+    startSomeActivity(ctx).catch(j.logNonAbort)
+  }
+}
+```
+
+### Undocumented
+
+Some minor APIs are exported but undocumented to avoid bloating the docs. Check the source file and look for `export`.
+
+## Changelog
+
+### 0.1.2
+
+TLDR: better support for "watch"-style tasks.
+
+Just like the Go `context` package, `Ctx` now supports sub-contexts. A sub-context created via `ctx.sub` prototypally inherits from the previous context, but has its own `AbortController` and `AbortSignal`. Just like in Go:
+
+* Aborting a super-context aborts every sub-context.
+* Sub-contexts can be aborted without aborting super-contexts.
+
+This is useful for watching-and-restarting, where each cycle uses a sub-context aborted before the next cycle.
+
+New `ctx` methods:
+
+* `ctx.sub`
+* `ctx.re`
+* `ctx.each`
+* `ctx.preEach`
+
+New functions:
+
+* `emptty`
+
+New undocumented functions. Various minor tweaks.
 
 ## License
 

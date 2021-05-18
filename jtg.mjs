@@ -109,18 +109,83 @@ export function kill(proc) {
   // Requires that the process was spawned with `detached: true`, putting it in
   // its own group. Jtg's `spawn` and `fork` do that.
   process.kill(-proc.pid)
+  proc.kill()
 }
 
-/* Internal Utils */
+export function emptty() {
+  process.stdout.write('\x1bc\x1b[3J')
+}
 
-const isWin = process.platform === 'win32'
-const procs = new Set()
-process.once('exit', killRemainingProcs)
+export class Ctx {
+  constructor() {
+    this.vals = new Map()
+    return ctxInit(this, new Abort())
+  }
+
+  run(fun) {
+    if (!this.vals.has(fun)) this.vals.set(fun, fun(this))
+    return this.vals.get(fun)
+  }
+
+  par(...funs) {
+    eachValid(funs, isFun)
+    return Promise.all(funs.map(this.run, this))
+  }
+
+  async ser(...funs) {
+    eachValid(funs, isFun)
+    for (const fun of funs) await this.run(fun)
+  }
+
+  sub(...args) {
+    return ctxInit(Object.create(this), this.abc.sub(...args))
+  }
+
+  re(...args) {
+    this.abort()
+    return Object.getPrototypeOf(this).sub(...args)
+  }
+
+  each(iter) {
+    return this.sub().subEach(iter)
+  }
+
+  async* preEach(iter) {
+    let ctx = this.sub()
+    yield [ctx]
+    for await (const val of ctx.subEach(iter)) yield val
+  }
+
+  async* subEach(iter) {
+    let ctx = this
+    for await (const val of iter) {
+      ctx = ctx.re()
+      yield [ctx, val]
+    }
+  }
+
+  abort() {this.abc.abort()}
+}
+
+/* Exported but undocumented */
 
 export async function runMain(fun) {
   const ctx = new Ctx()
   try {return await ctx.run(fun)}
-  finally {ctx.deinit()}
+  finally {ctx.abort()}
+}
+
+// Uses Node tricks because `AbortError` is not in global scope.
+export function isAbort(err) {
+  return isInst(err, Error) && err.code === 'ABORT_ERR'
+}
+
+export function throwNonAbort(err) {
+  if (!isAbort(err)) throw err
+}
+
+export function logNonAbort(val) {
+  if (!isAbort(val)) console.error(val)
 }
 
 export class Funs extends Map {
@@ -145,42 +210,24 @@ export class Funs extends Map {
   }
 }
 
-export class Ctx extends Map {
-  constructor() {
-    super()
-
-    Object.defineProperty(this, 'abc', {
-      value: new AbortController(),
-      enumerable: false,
-      configurable: true,
-    })
-
-    Object.defineProperty(this, 'signal', {
-      get() {return this.abc.signal},
-      enumerable: true,
-      configurable: true,
-    })
+export class Abort extends AbortController {
+  sub() {
+    const abc = new this.constructor(...arguments)
+    if (this.signal.aborted) abc.abort()
+    else abc.signal.addEventListener('abort', abc, {once: true})
+    return abc
   }
 
-  get [Symbol.toStringTag]() {return this.constructor.name}
-
-  run(fun) {
-    if (!this.has(fun)) this.set(fun, fun(this))
-    return this.get(fun)
+  handleEvent({type}) {
+    if (type === 'abort') this.abort()
   }
-
-  par(...funs) {
-    eachValid(funs, isFun)
-    return Promise.all(funs.map(this.run, this))
-  }
-
-  async ser(...funs) {
-    eachValid(funs, isFun)
-    for (const fun of funs) await this.run(fun)
-  }
-
-  deinit() {this.abc.abort()}
 }
+
+/* Internal Utils */
+
+const isWin = process.platform === 'win32'
+const procs = new Set()
+process.once('exit', killRemainingProcs)
 
 function onProcExit(proc) {
   const {exitCode: code, spawnargs: args} = proc
@@ -276,4 +323,16 @@ function show(val) {
   }
 
   return String(val)
+}
+
+function ctxInit(ctx, abc) {
+  Object.defineProperty(ctx, 'abc', {value: abc, enumerable: true, configurable: true})
+  Object.defineProperty(ctx, 'signal', sigDesc)
+  return ctx
+}
+
+const sigDesc = {
+  get() {return this.abc.signal},
+  enumerable: true,
+  configurable: true,
 }
