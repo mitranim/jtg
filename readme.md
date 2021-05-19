@@ -98,7 +98,7 @@ async function server(ctx) {
 }
 
 async function serverW(ctx) {
-  const events = fp.watch('scripts', {recursive: true, ...ctx})
+  const events = fp.watch('scripts', {...ctx, recursive: true})
 
   for await (const [sub] of ctx.preEach(events)) {
     j.fork('./scripts/server.mjs', [], sub).once('error', j.logNonAbort)
@@ -226,22 +226,26 @@ Clears the terminal. More specifically, prints (to stdout) escape codes "Reset t
 
 Represents a "task group", the context of a task run. Created automatically. The same instance is passed to every task in the group. Stores their results for deduplication.
 
-The only enumerable property is [`ctx.signal`](#property-ctxsignal). When calling APIs that take a `signal` for cancelation, pass `ctx` directly, or spread it into other options:
+Pass `ctx.signal` to APIs that take an `AbortSignal` for cancelation. You can pass `ctx` as-is, or merge `ctx.signal` with other opts:
 
 ```js
 import * as fp from 'fs/promises'
 import * as j from 'jtg'
 
 const events = fp.watch('some_folder', ctx)
-const events = fp.watch('some_folder', {recursive: true, ...ctx})
+const events = fp.watch('some_folder', {signal: ctx.signal, recursive: true})
+const events = fp.watch('some_folder', {...ctx, recursive: true})
 
 const proc = j.fork('some_file.mjs', [], ctx)
+const proc = j.fork('some_file.mjs', [], {signal: ctx.signal, killSignal: 'SIGINT'})
 const proc = j.fork('some_file.mjs', [], {...ctx, killSignal: 'SIGINT'})
 ```
 
 #### `property ctx.signal`
 
-Associated [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal), which is aborted when the main task terminates for any reason. Use this for [cancelation](#cancelation). Abort signals are the new standard for cancelation, supported by `fetch`, `child_process` and various other APIs.
+Associated [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal), which is the new standard for cancelation, supported by `fetch`, `child_process` and various other APIs. Use this for [cancelation](#cancelation).
+
+On the main context, this is aborted when the main task terminates for any reason. On sub-contexts created with [`ctx.sub`](#method-ctxsub), this is auto-aborted on each cycle of [`ctx.each`](#method-ctxeachiter) or [`ctx.preEach`](#method-ctxpreeachiter). Can be aborted manually via `ctx.abort` (undocumented) or [`ctx.re`](#method-ctxre).
 
 #### `method ctx.run(fun)`
 
@@ -371,6 +375,10 @@ async function watch() {
 Some minor APIs are exported but undocumented to avoid bloating the docs. Check the source file and look for `export`.
 
 ## Changelog
+
+### 0.1.3
+
+Fixed a memory/listener leak in sub-contexts.
 
 ### 0.1.2
 

@@ -118,8 +118,11 @@ export function emptty() {
 
 export class Ctx {
   constructor() {
-    this.vals = new Map()
-    return ctxInit(this, new Abort())
+    Object.defineProperties(this, {
+      vals: {value: new Map()},
+      abc: {value: new Abort()},
+      signal: sigDesc,
+    })
   }
 
   run(fun) {
@@ -137,13 +140,16 @@ export class Ctx {
     for (const fun of funs) await this.run(fun)
   }
 
-  sub(...args) {
-    return ctxInit(Object.create(this), this.abc.sub(...args))
+  sub() {
+    return Object.create(this, {
+      abc: {value: this.abc.sub()},
+      signal: sigDesc,
+    })
   }
 
-  re(...args) {
+  re() {
     this.abort()
-    return Object.getPrototypeOf(this).sub(...args)
+    return Object.getPrototypeOf(this).sub()
   }
 
   each(iter) {
@@ -211,15 +217,31 @@ export class Funs extends Map {
 }
 
 export class Abort extends AbortController {
+  constructor(sig) {
+    super()
+
+    if (!sig) return
+
+    if (sig.aborted) {
+      this.abort()
+      return
+    }
+
+    Object.defineProperty(this, 'sig', {value: sig})
+    sig.addEventListener('abort', this, {once: true})
+  }
+
   sub() {
-    const abc = new this.constructor(...arguments)
-    if (this.signal.aborted) abc.abort()
-    else abc.signal.addEventListener('abort', abc, {once: true})
-    return abc
+    return new this.constructor(this.signal)
   }
 
   handleEvent({type}) {
     if (type === 'abort') this.abort()
+  }
+
+  abort() {
+    if (this.sig) this.sig.removeEventListener('abort', this)
+    super.abort()
   }
 }
 
@@ -325,14 +347,7 @@ function show(val) {
   return String(val)
 }
 
-function ctxInit(ctx, abc) {
-  Object.defineProperty(ctx, 'abc', {value: abc, enumerable: true, configurable: true})
-  Object.defineProperty(ctx, 'signal', sigDesc)
-  return ctx
-}
-
 const sigDesc = {
   get() {return this.abc.signal},
   enumerable: true,
-  configurable: true,
 }
