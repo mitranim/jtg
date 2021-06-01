@@ -1,8 +1,8 @@
 {
   "name": "jtg",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
-  "main": "./jtg.mjs",
+  "main": "./jtg_node.mjs",
   "description": "JS task group. Simple JS-based replacement for Make, Gulp, etc.",
   "keywords": ["task-runner", "build", "make", "gulp"],
   "repository": {

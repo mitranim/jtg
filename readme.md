@@ -4,7 +4,12 @@
 
 Jtg works differently from other task runners. It's _not_ a CLI executable. It's just a library that you import and call.
 
-Tiny, depends only on Node.js (>= 0.15).
+Tiny, dependency-free. Two versions:
+
+* `jtg_node.mjs`: for [Node.js](https://nodejs.org) >= 0.15.
+* `jtg_deno.mjs`: for [Deno](https://deno.land).
+
+The API is isomorphic, but some functions are Node-only, at least for now.
 
 ## TOC
 
@@ -16,11 +21,7 @@ Tiny, depends only on Node.js (>= 0.15).
 * [API](#api)
   * [`function runCli`](#function-runclifuns)
   * [`function runArgs`](#function-runargsfuns-args)
-  * [`function spawn`](#function-spawncmd-args-opts)
-  * [`function fork`](#function-forkcmd-args-opts)
-  * [`function link`](#function-linkproc)
-  * [`function wait`](#function-waitproc)
-  * [`function kill`](#function-killproc)
+  * [`function watch`](#function-watchtarget-test-opts)
   * [`function emptty`](#function-emptty)
   * [`class Ctx`](#class-ctx)
     * [`property ctx.signal`](#property-ctxsignal)
@@ -31,6 +32,11 @@ Tiny, depends only on Node.js (>= 0.15).
     * [`method ctx.re`](#method-ctxre)
     * [`method ctx.each`](#method-ctxeachiter)
     * [`method ctx.preEach`](#method-ctxpreeachiter)
+  * [`function spawn`](#function-spawncmd-args-opts)
+  * [`function fork`](#function-forkcmd-args-opts)
+  * [`function link`](#function-linkproc)
+  * [`function wait`](#function-waitproc)
+  * [`function kill`](#function-killproc)
   * [Undocumented](#undocumented)
 * [Changelog](#changelog)
 
@@ -41,7 +47,11 @@ Tiny, depends only on Node.js (>= 0.15).
 * Gulp is too bloated and complex.
 * Most task runners force you to use their CLI, invariably bloated, slow, buggy, and full of weird shit.
 
+Jtg is JS-based, tiny, trivially simple, and _is not a CLI_.
+
 ## Usage
+
+In Node, install via NPM, run your script via `node`. See the sample `make.mjs` script below.
 
 ```sh
 npm i -ED jtg
@@ -58,7 +68,13 @@ node make.mjs --help
 # Known tasks (case-sensitive): ["watch","build","styles","scripts","server"]
 ```
 
-Sample `make.mjs`. The file name is arbitrary.
+In Deno, import by URL, run your script via `deno run`.
+
+```js
+import * as j from 'https://unpkg.com/jtg@<version>/jtg_deno.mjs'
+```
+
+Sample `make.mjs` for Node. The file name is arbitrary.
 
 ```js
 import * as fp from 'fs/promises'
@@ -125,18 +141,20 @@ Cancelation happens for the following reasons:
 
 Cancelation happens in the following ways:
 
-* When the main process terminates, its _immediate_ children also terminate. On Windows, this is true for all immediate children. On Unix, this is true for children created by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts). However, _indirect_ children may not terminate; see [Process Leaks](#process-leaks).
-* When the main task terminates, but the process is still running, the [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) available as [`ctx.signal`](#property-ctxsignal) is aborted, causing termination of any activities that took this signal, including subprocesses created by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts), if `ctx` was passed to them.
+* When the main process terminates, its _immediate_ children _may_ also terminate, depending on exactly how your Node/Deno process got killed. In Node on Unix, this is only true for children created by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts). However, _indirect_ children usually will _not_ automatically terminate; see [Process Leaks](#process-leaks).
+* When the main task terminates, but the process is still running, the [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) available as [`ctx.signal`](#property-ctxsignal) is aborted, causing termination of any activities that took this signal, including subprocesses created by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts), if `ctx` was passed to them. Note that `Deno.run` doesn't support abort signals yet (as of `1.10.1`).
 
 ### Process Leaks
 
-By default, on _all_ operating systems, child processes don't terminate together with parents. On Windows, Node uses the "job object" API to link with its _immediate_ children, but not their descendants. Be aware that most programs, written for most systems, don't link with their child processes this way.
+By default, on _all_ operating systems, child processes don't terminate together with parents. Both Node and Deno make some limited effort to terminate their _immediate_ children, but not their descendants. Be aware that most programs, written for most systems, don't link with their child processes this way.
 
-Explicit termination via `Ctrl+C` usually works on every system, but crashes are fraught with peril. When you shell out to `sh` (Unix) or `cmd.exe` (Windows) to spawn another program, and then Node crashes or gets killed, the shell will terminate, but that other program will not.
+Interrupt via `Ctrl+C` usually works on every system, but crashes are fraught with peril. For example, when you shell out to `sh` (Unix) or `cmd.exe` (Windows) to spawn another program, and then the current process crashes or gets killed, the shell sub-process will terminate, but the sub-sub-process will not.
 
-On Unix, Jtg makes an effort to kill entire subprocess groups. However, on Windows, the necessary operating system APIs appear to be unavailable in Node. To reduce process leaks, avoid sub-sub-processes.
+On Unix, Jtg's subprocess functions such as [`spawn`](#function-spawncmd-args-opts) and [`kill`](#function-killproc) make an effort to ensure termination of entire subprocess groups. However, on Windows, the necessary operating system APIs appear to be unavailable in Node. To reduce process leaks, avoid sub-sub-processes.
 
-The [Usage](#usage) example above invokes `sass`, which demonstrates this very problem. At the time of writing, the recommended Sass implementation is `dart-sass`, and the recommended way to install it on Windows is via Chocolatey. The installation process creates one real executable and one unnecessary wrapper executable, which shells out to the real one, without linking together via a job object. An abrupt termination leaks the sub-sub-process. You can avoid this issue by modifying your `%PATH%`, allowing the OS to find the real executable before the fake one. The problem should never have existed in the first place.
+The [Usage](#usage) example above invokes `sass`, which demonstrates this very problem. At the time of writing, the recommended Sass implementation is `dart-sass`, and the recommended way to install it on Windows is via Chocolatey. The installation process creates one real executable and one unnecessary wrapper executable, which shells out to the real one, _without_ linking together via the job object API. An abrupt termination leaks the sub-sub-process. You can avoid this issue by modifying your `%PATH%`, allowing the OS to find the real executable before the fake one.
+
+On Windows, Deno currently doesn't use the job object API. When a Deno process gets killed by an external cause other than Ctrl+C, even the immediate child processes are not killed.
 
 ## API
 
@@ -166,61 +184,34 @@ j.runArgs([build, watch], [])
 j.runArgs([build, watch], ['--help'])
 ```
 
-### `function spawn(cmd, args, opts)`
+### `function watch(target, test, opts)`
 
-Variant of `child_process.spawn` where:
+An [async iterator](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of) over FS events. Wraps `'fs/promises'.watch` (Node) or `Deno.watchFs` (Deno), normalizing FS paths and filtering them via `test`.
 
-* Standard output/error is inherited from the parent process.
-* Sub-sub-processes are less likely to [leak](#process-leaks) (Unix only).
+`test` may be nil, a function, or a `RegExp`. It tests an FS path, always Posix-style (`/`-separated) and relative to the current working directory (`process.cwd()` or `Deno.cwd()`). If the test fails (the result is falsy), an event is ignored (not yielded).
 
-Should be combined with [`wait`](#function-waitproc). Pass `ctx` as the last argument to take advantage of [`ctx.signal`](#property-ctxsignal) for cancelation.
+`target` and `opts` are passed directly to the underlying FS watch API. Additionally, this adds missing support for `opts.signal` in Deno. (Known issue: in some Deno versions/environments, attempting to stop file watching may fail with a `BadSource` error.)
 
-```js
-async function styles(ctx) {
-  await j.wait(j.spawn('sass', ['main.scss:main.css'], ctx))
-}
-```
+For watch-and-restart tasks, wrap this iterator via [`ctx.each`](#method-ctxeachiter) or [`ctx.preEach`](#method-ctxpreeachiter), which create a separate `AbortSignal` for each iteration.
 
-### `function fork(cmd, args, opts)`
-
-Variant of `child_process.fork` where:
-
-* Standard output/error is inherited from the parent process.
-* Sub-sub-processes are less likely to [leak](#process-leaks) (Unix only).
-
-Should be combined with [`wait`](#function-waitproc). Pass `ctx` as the last argument to take advantage of [`ctx.signal`](#property-ctxsignal) for cancelation.
+Example:
 
 ```js
-async function server(ctx) {
-  await j.wait(j.fork('./scripts/server.mjs', [], ctx))
+import * as j from 'jtg'
+
+function watch(ctx) {
+  const events = j.watch('target', /[.]html|css$/, {...ctx, recursive: true})
+
+  for await (const event of events) {
+    notifyClientsAboutChanges(event)
+  }
 }
+
 ```
-
-### `function link(proc)`
-
-Used internally by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts). Registers the process for additional cleanup via [`kill`](#function-killproc). Returns the same process.
-
-### `function wait(proc)`
-
-Returns a `Promise` that resolves when the provided process terminates for any reason.
-
-```js
-async function styles(ctx) {
-  await j.wait(j.spawn('sass', ['main.scss:main.css'], ctx))
-}
-```
-
-### `function kill(proc)`
-
-Variant of `proc.kill()` that tries to terminate the entire subprocess tree. Assumes that it was spawned by [`spawn`](#function-spawncmd-args-opts) or [`fork`](#function-forkcmd-args-opts). These functions share some platform-specific logic.
-
-Automatically used by [`link`](#function-linkproc). In most cases, you don't need to call this. Provided for cases such as restarting a server on changes, where a manual kill is required.
-
-On Windows, this is equivalent to `proc.kill()`. On Unix, this tries to send a termination signal to the entire subprocess group.
 
 ### `function emptty()`
 
-Clears the terminal. More specifically, prints (to stdout) escape codes "Reset to Initial State" and "Erase in Display (3)", causing a full-clear in most terminals. Useful for watching-and-restarting.
+Clears the terminal. More specifically, prints to stdout escape codes "Reset to Initial State" and "Erase in Display (3)", causing a full-clear in most terminals. Useful for watching-and-restarting.
 
 ### `class Ctx`
 
@@ -350,9 +341,7 @@ async function watch(ctx) {
 }
 ```
 
-#### `method ctx.preEach(iter, fun)`
-
-where `fun(ctx, any)`.
+#### `method ctx.preEach(iter)`
 
 Same as [`ctx.each`](#method-ctxeachiter), but starts immediately, by yielding one sub-context before walking the async iterable.
 
@@ -365,16 +354,77 @@ async function watch() {
   const events = fp.watch('some_folder', ctx)
 
   for await (const [sub] of ctx.preEach(events)) {
-    startSomeActivity(ctx).catch(j.logNonAbort)
+    startSomeActivity(sub).catch(j.logNonAbort)
   }
 }
 ```
 
+### `function spawn(cmd, args, opts)`
+
+(Only in `jtg_node.mjs`.) Variant of `child_process.spawn` where:
+
+* Standard output/error is inherited from the parent process.
+* Sub-sub-processes are less likely to [leak](#process-leaks) (Unix only).
+
+Should be combined with [`wait`](#function-waitproc). Pass `ctx` as the last argument to take advantage of [`ctx.signal`](#property-ctxsignal) for cancelation.
+
+```js
+async function styles(ctx) {
+  await j.wait(j.spawn('sass', ['main.scss:main.css'], ctx))
+}
+```
+
+### `function fork(cmd, args, opts)`
+
+(Only in `jtg_node.mjs`.) Variant of `child_process.fork` where:
+
+* Standard output/error is inherited from the parent process.
+* Sub-sub-processes are less likely to [leak](#process-leaks) (Unix only).
+
+Should be combined with [`wait`](#function-waitproc). Pass `ctx` as the last argument to take advantage of [`ctx.signal`](#property-ctxsignal) for cancelation.
+
+```js
+async function server(ctx) {
+  await j.wait(j.fork('./scripts/server.mjs', [], ctx))
+}
+```
+
+### `function link(proc)`
+
+(Only in `jtg_node.mjs`.)
+
+Used internally by [`spawn`](#function-spawncmd-args-opts) and [`fork`](#function-forkcmd-args-opts). Registers the process for additional cleanup via [`kill`](#function-killproc). Returns the same process.
+
+### `function wait(proc)`
+
+(Only in `jtg_node.mjs`.) Returns a `Promise` that resolves when the provided process terminates for any reason.
+
+```js
+async function styles(ctx) {
+  await j.wait(j.spawn('sass', ['main.scss:main.css'], ctx))
+}
+```
+
+### `function kill(proc)`
+
+(Only in `jtg_node.mjs`.)
+
+Variant of `proc.kill()` that tries to terminate the entire subprocess tree. Assumes that it was spawned by [`spawn`](#function-spawncmd-args-opts) or [`fork`](#function-forkcmd-args-opts). These functions share some platform-specific logic.
+
+Automatically used by [`link`](#function-linkproc). In most cases, you don't need to call this. Provided for cases such as restarting a server on changes, where a manual kill is required.
+
+On Windows, this is equivalent to `proc.kill()`. On Unix, this tries to send a termination signal to the entire subprocess group.
+
 ### Undocumented
 
-Some minor APIs are exported but undocumented to avoid bloating the docs. Check the source file and look for `export`.
+Some minor APIs are exported but undocumented to avoid bloating the docs. Check the source files and look for `export`.
 
 ## Changelog
+
+### 0.1.4
+
+* Support both Node and Deno.
+* Added `watch`.
 
 ### 0.1.3
 
